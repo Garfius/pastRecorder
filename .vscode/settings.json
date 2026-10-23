@@ -1,0 +1,8 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^& 'C:\\\\Users\\\\gerard\\\\\\.platformio\\\\penv\\\\Scripts\\\\platformio\\.exe' run -e zeroTiny -s$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}
