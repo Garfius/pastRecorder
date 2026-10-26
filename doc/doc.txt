@@ -1,0 +1,82 @@
+
+5xgzqSYDkaftBvLbrz8lr
+Yes, 24 kbps is generally okay and highly efficient for encoding a 16 kHz WAV file
+Yes, converting a 16kHz WAV file to a 16kbps mono MP3 will work perfectly fine
+
+https://github.com/earlephilhower/arduino-pico/blob/master/libraries/rp2040/examples/RestartReason/RestartReason.ino
+## context
+https://github.com/earlephilhower/arduino-pico/blob/master/libraries/rp2040/examples/DMAMemcpy/DMAMemcpy.ino
+https://github.com/Bodmer/Adafruit-GFX-Library
+https://github.com/Bodmer/Adafruit_ILI9341 <--
+https://github.com/earlephilhower/ESP8266Audio
+https://github.com/pschatzmann/arduino-audio-tools
+	IMA ADPCM <--
+	DPCM (Differential PCM)
+	rp2040.memcpyDMA(
+	analogReadTemp
+- 3PCS INMP441 MEMS Microphone Module I2S Interface 
+- Interface definition:
+	SCK: Serial data clock for I2S interface
+	WS: Serial data word selection for I2S interface
+	L/R: Left/Right channel selection.
+	When set to low, the microphone outputs a signal on the left channel of the I2S frame.
+	When set to high level, the microphone outputs signals on the right channel
+	SD: Serial data output of the I2S interface.
+	VCC: Input power, 1.8V to 3.3V.
+	GND: power ground
+	This product provides tutorials for using ESP32 modules with I2S functionality.
+bootsel click example: 
+	C:\Users\gerard\.platformio\packages\framework-arduinopico\libraries\rp2040\examples\Bootsel\Bootsel.ino - https://github.com/earlephilhower/arduino-pico/blob/master/libraries/rp2040/examples/Bootsel/Bootsel.ino
+	C:\Users\gerard\.platformio\packages\framework-arduinopico\cores\rp2040\Bootsel.cpp
+
+Bootsel.ino	C:\Users\gerard\.platformio\packages\framework-arduinopico\libraries\rp2040\examples\Bootsel	425	19/10/2026 16:26:36	19/10/2026 16:28:58	26/10/2026 11:09:25	19/10/2026 16:28:58	A	ino						25-0036\gerard	4.096
+
+### context
+Microcontroller c++ rp2040/rp2350
+Framework: arduino
+Core: https://github.com/earlephilhower/arduino-pico
+INMP441 MEMS Microphone Module I2S Interface 
+Serial UI: Serial
+Serial XModem: Serial
+Filesystem library: https://github.com/earlephilhower/arduino-pico/tree/master/libraries/LittleFS
+Xmodem library (LittleFS compatible): https://github.com/Garfius/xModemArdiuno
+Not tested INMP441 library: https://github.com/biemster/pico-I2S
+## task
+Application at boot Show littlefs content, greeting message and ask 'what to do'
+what to do
+- Record (5 sec| available) voice from microphone to Littlefs
+- Show recorded message file size and send it via XModem
+
+https://github.com/Garfius/xModemArdiuno
+https://github.com/biemster/pico-I2S
+------------------requeriments base
+- medidor de bateria - On the Raspberry Pi Pico, GPIO29 is connected internally to the VSYS power supply through a voltage divider (a 200kΩ and 100kΩ resistor network), allowing you to measure the input voltage level of the board via ADC channel 3.
+ - https://github.com/TuriSc/RP2040-Battery-Check/tree/main
+- menus via serial using https://github.com/Garfius/cliSerialMenu *2 
+ - Audio qualitat config
+ - copiar mp3 de flash a nova carpeta microSD
+ - llistar microSD 
+ - llistar fash
+ - reanudar 'record past'
+ - alguna opció mostra estat de tot plegat 
+- si no hi ha SD usar (flash = littlefs) *1
+- Botó boto per gravar= Bootsel ?
+- mirar com fer l'amplificació demanar peràmetyres de compressió de audio - Fixed gain with limiter/compressor - https://github.com/pschatzmann/arduino-audio-tools/blob/89ee5e87561f21d3e2664f7bddb8bd6d0b7eff89/examples/examples-dsp/examples-maximilian/17-Compressor/17-Compressor.ino - (configure maxiDyn compressor with attack, release, threshold, and ratio.)
+- com fer led pulsacions/colors?
+microcontroller check battery level using cbat vsys vbus
+- shall trrack or be able to calculate tail mp3 block location, you choose, so saves all blocks/frames/chunks
+- save button is driven by iunterrupt at a preprocessor defined gpio, which stops ALL (both cores(record & mp3 encode), serial menu) and saves whole buffer to storage *1
+- are mp3 frames respected?
+- does mp3 compressor have options?
+- change audio quality settings, shall be set via *2
+- At serial port activity all is paused until further order like ( button physical push | menu option)
+- default and hardware pins at: /home/garfius/.platformio/packages/framework-arduinopico/variants/waveshare_rp2350_pizero/pins_arduino.h
+-------------------
+Memory available at boot:
+  rp2040 API: heap 447592, used 2864, free 444728 bytes
+  mallinfo(): arena 5224, in use 2864, free chunks 2360, never claimed 442368 bytes
+  largest malloc() block: 442348 bytes
+------------------------
+At boot tell the maximum memory available via memory alloction request ``malloc`` or alike, using various methods if possible.
+Tell me mp3 .pio\libdeps\Rp2350ZeroDebug\audio-tools\src\AudioTools\AudioCodecs\CodecMP3Shine.h compression quality options available
+Add a menu which is like ``choice == "1"`` but uses Maximilian to compress audio volume like at .pio\libdeps\Rp2350ZeroDebug\audio-tools\examples\examples-dsp\examples-maximilian\17-Compressor\17-Compressor.ino

@@ -5,7 +5,10 @@
 #include <AudioTools.h>
 #include <AudioTools/AudioCodecs/CodecMP3Shine.h>
 #include <pico/sync.h>
+#include <malloc.h>
+#include <new>
 #include <string.h>
+#include "VoiceCompressor.h"
 
 #define serialPortUsed Serial1
 
@@ -418,6 +421,7 @@ void showMenu() {
   serialPortUsed.println(F("  2 - Show recording size and send by XModem"));
   serialPortUsed.println(
       F("  3 - Record to RAM (MP3 encoded live on core 1), save later and send by XModem"));
+  serialPortUsed.println(F("  4 - Record a 5 second voice message, volume compressed with Maximilian"));
   serialPortUsed.print(F("> "));
 }
 
@@ -533,7 +537,7 @@ bool configureMicrophone() {
          microphone.setFrequency(kSampleRate) && microphone.setBuffers(6, 512);
 }
 
-void recordVoice() {
+void recordVoice(bool compress) {
   if (!fileSystemReady) {
     serialPortUsed.println(F("LittleFS is not available."));
     return;
@@ -589,6 +593,9 @@ void recordVoice() {
     return;
   }
 
+  if (compress) {
+    voiceCompressorBegin(kSampleRate);
+  }
   serialPortUsed.println(F("Recording for 5 seconds..."));
   uint8_t pcmBuffer[512];
   size_t bufferedBytes = 0;
@@ -600,7 +607,10 @@ void recordVoice() {
       recordingOk = false;
       break;
     }
-    const int32_t microphoneSample = kMicRightChannel ? rightSample : leftSample;
+    int32_t microphoneSample = kMicRightChannel ? rightSample : leftSample;
+    if (compress) {
+      microphoneSample = voiceCompressorProcess(microphoneSample);
+    }
     if (bufferedBytes + kWavSampleBytes > sizeof(pcmBuffer)) {
       if (recording.write(pcmBuffer, bufferedBytes) != bufferedBytes) {
         recordingOk = false;
@@ -841,6 +851,47 @@ void showSizeAndSend() {
   sendRecordingByXModem(recordingPath);
 }
 
+// Binary search for the largest block the allocator can hand out right now.
+template <typename Allocate, typename Release>
+size_t largestAllocation(Allocate allocate, Release release) {
+  size_t low = 0;
+  size_t high =
+      static_cast<size_t>(rp2040.getTotalHeap() + rp2040.getTotalPSRAMHeap());
+  while (low < high) {
+    const size_t middle = low + (high - low + 1) / 2;
+    void *block = allocate(middle);
+    if (block) {
+      // Touch both ends so the compiler cannot elide the allocation.
+      volatile uint8_t *bytes = static_cast<volatile uint8_t *>(block);
+      bytes[0] = 0xA5;
+      bytes[middle - 1] = 0xA5;
+      release(block);
+      low = middle;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return low;
+}
+
+void reportAvailableMemory() {
+  const struct mallinfo heapInfo = mallinfo();
+  const int totalHeap = rp2040.getTotalHeap();
+  const size_t largestMalloc = largestAllocation(
+      [](size_t size) -> void * { return malloc(size); },
+      [](void *block) { free(block); });
+
+  serialPortUsed.println(F("Memory available at boot:"));
+  serialPortUsed.printf("  rp2040 API: heap %d, used %d, free %d bytes\r\n", totalHeap,
+                        rp2040.getUsedHeap(), rp2040.getFreeHeap());
+  serialPortUsed.printf(
+      "  mallinfo(): arena %d, in use %d, free chunks %d, never claimed %d bytes\r\n",
+      heapInfo.arena, heapInfo.uordblks, heapInfo.fordblks,
+      totalHeap - heapInfo.arena);
+  serialPortUsed.printf("  largest malloc() block: %u bytes\r\n",
+                        static_cast<unsigned>(largestMalloc));
+}
+
 void setup() {
   serialPortUsed.begin(115200);
   const uint32_t serialWaitStart = millis();
@@ -866,18 +917,22 @@ void setup() {
   sem_init(&ramEncodeDone, 0, 1);
   __mem_fence_release();
   ramSyncReady = true;
+
+  reportAvailableMemory();
 }
 
 void loop() {
   showMenu();
   const String choice = readLine();
   if (choice == "1") {
-    recordVoice();
+    recordVoice(false);
   } else if (choice == "2") {
     showSizeAndSend();
   } else if (choice == "3") {
     recordToRamSaveLater();
+  } else if (choice == "4") {
+    recordVoice(true);
   } else {
-    serialPortUsed.println(F("Choose 1, 2 or 3."));
+    serialPortUsed.println(F("Choose 1, 2, 3 or 4."));
   }
 }
