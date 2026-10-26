@@ -80,3 +80,17 @@ Memory available at boot:
 At boot tell the maximum memory available via memory alloction request ``malloc`` or alike, using various methods if possible.
 Tell me mp3 .pio\libdeps\Rp2350ZeroDebug\audio-tools\src\AudioTools\AudioCodecs\CodecMP3Shine.h compression quality options available
 Add a menu which is like ``choice == "1"`` but uses Maximilian to compress audio volume like at .pio\libdeps\Rp2350ZeroDebug\audio-tools\examples\examples-dsp\examples-maximilian\17-Compressor\17-Compressor.ino
+-----------------
+directe ram
+CPU load:
+  core 0 (recording): busy 0.5%, free 4982 ms of 5007 ms
+  core 1 (encoding): busy 36.5%, free 3184 ms of 5020 ms
+Saved /voice_ram.mp3 (20016 bytes). Encoder finished 11 ms after the last sample
+Opcio 5
+CPU load:
+  core 0 (recording): busy 2.8%, free 4863 ms of 5007 ms
+  core 1 (encoding): busy 37.0%, free 3160 ms of 5020 ms
+Opcio 6
+CPU load:
+  core 0 (recording): busy 0.5%, free 4982 ms of 5007 ms
+  core 1 (encoding): busy 39.4%, free 3041 ms of 5020 ms

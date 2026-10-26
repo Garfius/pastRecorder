@@ -287,6 +287,9 @@ volatile bool ramProducerDone = false;
 volatile bool ramAbort = false;
 volatile bool ramEncoderFailed = false;
 volatile bool ramSyncReady = false;
+volatile bool ramCompressOnCore1 = false;
+volatile uint32_t ramCore1IdleUs = 0;   // written by core 1 before it releases ramEncodeDone
+volatile uint32_t ramCore1TotalUs = 0;
 semaphore_t ramEncodeStart;
 semaphore_t ramEncodeDone;
 uint8_t ramPcmStage[kMp3PcmBufferSize];
@@ -303,6 +306,9 @@ void encodeRamRecording() {
   Mp3Resampler resampler;
   size_t stagedBytes = 0;
   uint32_t tail = 0;
+  const bool compress = ramCompressOnCore1;
+  const uint32_t startUs = micros();
+  uint32_t idleUs = 0;
   bool encodingOk = encoder.begin();
 
   while (true) {
@@ -323,7 +329,9 @@ void encodeRamRecording() {
       if (producerFinished) {
         break;
       }
+      const uint32_t idleStartUs = micros();
       delay(1);
+      idleUs += micros() - idleStartUs;
       continue;
     }
     if (pending > kRingConsumeSamples) {
@@ -331,7 +339,11 @@ void encodeRamRecording() {
     }
 
     for (uint32_t n = 0; n < pending && encodingOk; ++n) {
-      const int16_t sample = ramPcmRing[tail++ & kPcmRingMask];
+      int16_t sample = ramPcmRing[tail++ & kPcmRingMask];
+      if (compress) {
+        sample = static_cast<int16_t>(
+            voiceCompressorProcess(static_cast<int32_t>(sample) * 65536) >> 16);
+      }
       encodingOk = resampler.push(sample, [&](int16_t outputSample) {
         return writeMp3Sample(encoder, ramPcmStage, stagedBytes, outputSample);
       });
@@ -348,6 +360,8 @@ void encodeRamRecording() {
   if (!encodingOk || ramMp3Sink.overflow()) {
     ramEncoderFailed = true;
   }
+  ramCore1IdleUs = idleUs;
+  ramCore1TotalUs = micros() - startUs;
 }
 
 void setup1() {
@@ -422,6 +436,8 @@ void showMenu() {
   serialPortUsed.println(
       F("  3 - Record to RAM (MP3 encoded live on core 1), save later and send by XModem"));
   serialPortUsed.println(F("  4 - Record a 5 second voice message, volume compressed with Maximilian"));
+  serialPortUsed.println(F("  5 - Like 3, volume compressed on core 0 (before the PCM ring)"));
+  serialPortUsed.println(F("  6 - Like 3, volume compressed on core 1 (before the MP3 encoder)"));
   serialPortUsed.print(F("> "));
 }
 
@@ -676,7 +692,25 @@ void sendRecordingByXModem(const char *recordingPath) {
                       : F("XModem transfer failed."));
 }
 
-void recordToRamSaveLater() {
+enum class RamCompression : uint8_t { None, OnCore0, OnCore1 };
+
+void printCoreLoad(const __FlashStringHelper *label, uint32_t idleUs,
+                   uint32_t totalUs) {
+  if (idleUs > totalUs) {
+    idleUs = totalUs;
+  }
+  const uint32_t busyPermille =
+      totalUs ? static_cast<uint32_t>((static_cast<uint64_t>(totalUs - idleUs) * 1000) / totalUs)
+              : 0;
+  serialPortUsed.printf("  %s: busy %lu.%lu%%, free %lu ms of %lu ms\r\n",
+                        reinterpret_cast<const char *>(label),
+                        static_cast<unsigned long>(busyPermille / 10),
+                        static_cast<unsigned long>(busyPermille % 10),
+                        static_cast<unsigned long>(idleUs / 1000),
+                        static_cast<unsigned long>(totalUs / 1000));
+}
+
+void recordToRamSaveLater(RamCompression compression) {
   if (!fileSystemReady) {
     serialPortUsed.println(F("LittleFS is not available."));
     return;
@@ -712,6 +746,11 @@ void recordToRamSaveLater() {
   ramProducerDone = false;
   ramAbort = false;
   ramEncoderFailed = false;
+  ramCompressOnCore1 = compression == RamCompression::OnCore1;
+  // The compressor is one global instance: reset it here, before the sem_release hands it to core 1.
+  if (compression != RamCompression::None) {
+    voiceCompressorBegin(kSampleRate);
+  }
   while (sem_try_acquire(&ramEncodeDone)) {
   }
   sem_release(&ramEncodeStart);
@@ -719,14 +758,21 @@ void recordToRamSaveLater() {
   const __FlashStringHelper *failure = nullptr;
   uint32_t head = 0;
   uint32_t ringPeak = 0;
+  uint32_t core0IdleUs = 0;
+  uint32_t core0TotalUs = 0;
   if (!microphone.begin()) {
     failure = F("Could not start I2S microphone.");
   } else {
     serialPortUsed.println(F("Recording for 5 seconds into RAM..."));
+    const uint32_t core0StartUs = micros();
     for (uint32_t sampleIndex = 0; sampleIndex < kSampleCount; ++sampleIndex) {
       int32_t leftSample;
       int32_t rightSample;
-      if (!microphone.read32(&leftSample, &rightSample)) {
+      // Time blocked waiting for the I2S FIFO counts as free CPU time.
+      const uint32_t readStartUs = micros();
+      const bool readOk = microphone.read32(&leftSample, &rightSample);
+      core0IdleUs += micros() - readStartUs;
+      if (!readOk) {
         failure = F("I2S read failed.");
         break;
       }
@@ -738,7 +784,10 @@ void recordToRamSaveLater() {
       if (queued > ringPeak) {
         ringPeak = queued;
       }
-      const int32_t microphoneSample = kMicRightChannel ? rightSample : leftSample;
+      int32_t microphoneSample = kMicRightChannel ? rightSample : leftSample;
+      if (compression == RamCompression::OnCore0) {
+        microphoneSample = voiceCompressorProcess(microphoneSample);
+      }
       ramPcmRing[head++ & kPcmRingMask] = static_cast<int16_t>(microphoneSample >> 16);
       if ((head & (kRingPublishSamples - 1)) == 0) {
         __mem_fence_release();
@@ -748,6 +797,10 @@ void recordToRamSaveLater() {
           break;
         }
       }
+    }
+    core0TotalUs = micros() - core0StartUs;
+    if (!failure && microphone.getOverflow()) {
+      serialPortUsed.println(F("Warning: I2S input overflowed, core 0 could not keep up; samples were lost."));
     }
     microphone.end();
   }
@@ -762,6 +815,10 @@ void recordToRamSaveLater() {
   ramProducerDone = true;
   sem_acquire_blocking(&ramEncodeDone);
   const uint32_t encoderLagMs = millis() - recordingEndMs;
+
+  serialPortUsed.println(F("CPU load:"));
+  printCoreLoad(F("core 0 (recording)"), core0IdleUs, core0TotalUs);
+  printCoreLoad(F("core 1 (encoding)"), ramCore1IdleUs, ramCore1TotalUs);
 
   if (!failure && (ramEncoderFailed || ramMp3Sink.overflow() ||
                    ramMp3Sink.size() == 0)) {
@@ -929,10 +986,14 @@ void loop() {
   } else if (choice == "2") {
     showSizeAndSend();
   } else if (choice == "3") {
-    recordToRamSaveLater();
+    recordToRamSaveLater(RamCompression::None);
   } else if (choice == "4") {
     recordVoice(true);
+  } else if (choice == "5") {
+    recordToRamSaveLater(RamCompression::OnCore0);
+  } else if (choice == "6") {
+    recordToRamSaveLater(RamCompression::OnCore1);
   } else {
-    serialPortUsed.println(F("Choose 1, 2, 3 or 4."));
+    serialPortUsed.println(F("Choose 1 to 6."));
   }
 }

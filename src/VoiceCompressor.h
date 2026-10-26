@@ -21,5 +21,5 @@
 // Resets the compressor state for a mono stream at sampleRate.
 void voiceCompressorBegin(uint32_t sampleRate);
 
-// Compresses one full-scale signed 32-bit sample.
+// High-passes, gains, compresses and limits one full-scale signed 32-bit sample.
 int32_t voiceCompressorProcess(int32_t sample);
