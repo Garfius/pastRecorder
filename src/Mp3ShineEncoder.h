@@ -14,11 +14,14 @@ class Mp3ShineEncoder {
   Mp3ShineEncoder(const Mp3ShineEncoder &) = delete;
   Mp3ShineEncoder &operator=(const Mp3ShineEncoder &) = delete;
 
+  // Allocate once before sizing the recording ring; begin/end reuse this memory.
+  bool prepare();
   bool begin();
   size_t write(const uint8_t *data, size_t length);
   bool end();
 
  private:
+  void resetEncoder();
   bool writeFrame();
   bool writeOutput(const uint8_t *data, int length);
 
@@ -30,4 +33,5 @@ class Mp3ShineEncoder {
   size_t frameBytes_ = 0;
   size_t bufferedBytes_ = 0;
   bool failed_ = false;
+  bool active_ = false;
 };

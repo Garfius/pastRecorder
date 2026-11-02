@@ -815,17 +815,32 @@ class StorageManager {
 
 class CircularRecorder {
  public:
-  CircularRecorder() : microphone_(INPUT), mp3Sink_(mp3Buffer_) {}
+  CircularRecorder()
+      : microphone_(INPUT), mp3Sink_(mp3Buffer_),
+        encoder_(mp3Sink_, CFG_AUDIO_SAMPLE_RATE, CFG_MP3_BITRATE_KBPS) {}
 
   bool initializeMp3Buffer(size_t reserveBytes, size_t minBytes, size_t stepBytes,
                            size_t *largestAtBoot, size_t *chosenSize) {
-    return mp3Buffer_.allocateWithHeadroom(reserveBytes, minBytes, stepBytes,
-                                           largestAtBoot, chosenSize);
+    if (workerBusy_) {
+      lastError_ = F("Cannot resize MP3 ring while encoder worker is busy.");
+      return false;
+    }
+    mp3Buffer_.clear();
+    if (!prepareAudioResources()) {
+      return false;
+    }
+    if (!mp3Buffer_.allocateWithHeadroom(reserveBytes, minBytes, stepBytes,
+                                         largestAtBoot, chosenSize)) {
+      lastError_ = F("Could not allocate MP3 ring after audio resources.");
+      return false;
+    }
+    return true;
   }
 
   void initCoreSync() {
     sem_init(&encodeStart_, 0, 1);
     sem_init(&encodeDone_, 0, 1);
+    sem_init(&encodeReady_, 0, 1);
     __mem_fence_release();
     coreSyncReady_ = true;
   }
@@ -836,13 +851,16 @@ class CircularRecorder {
     if (running_) {
       return true;
     }
+    if (workerBusy_) {
+      lastError_ = F("Encoder worker has not stopped; restart refused.");
+      return false;
+    }
     if (mp3Buffer_.capacity() == 0) {
       lastError_ = F("MP3 ring buffer is not allocated.");
       return false;
     }
 
-    if (!configureMicrophone()) {
-      lastError_ = F("Could not configure I2S microphone.");
+    if (!prepareAudioResources()) {
       return false;
     }
 
@@ -855,6 +873,7 @@ class CircularRecorder {
     ringTailPublished_ = 0;
     producerDone_ = false;
     encoderFailed_ = false;
+    encoderStarted_ = false;
     core1IdleUs_ = 0;
     core1TotalUs_ = 0;
 
@@ -871,13 +890,37 @@ class CircularRecorder {
 
     while (sem_try_acquire(&encodeDone_)) {
     }
+    while (sem_try_acquire(&encodeReady_)) {
+    }
 
-    if (!microphone_.begin()) {
-      lastError_ = F("Could not start I2S microphone.");
+    workerBusy_ = true;
+    __mem_fence_release();
+    sem_release(&encodeStart_);
+    const uint32_t waitStartMs = millis();
+    while (!sem_try_acquire(&encodeReady_)) {
+      if (millis() - waitStartMs >= CFG_ENCODER_START_TIMEOUT_MS) {
+        lastError_ = F("Encoder startup timeout.");
+        stop();
+        return false;
+      }
+      delay(1);
+    }
+    __mem_fence_acquire();
+    if (!encoderStarted_) {
+      lastError_ = F("Could not initialize MP3 encoder on core1.");
+      stop();
       return false;
     }
 
-    sem_release(&encodeStart_);
+    // I2S was started before ring allocation/encoder reset. Discard its old
+    // stereo frames so a resumed recording does not include menu/save audio.
+    int32_t discardedLeft = 0;
+    int32_t discardedRight = 0;
+    const int queuedFrames = microphone_.available() / (2 * sizeof(int32_t));
+    for (int index = 0; index < queuedFrames; ++index) {
+      microphone_.read32(&discardedLeft, &discardedRight);
+    }
+    microphone_.getOverflow();
     startedAtMs_ = millis();
     running_ = true;
     return true;
@@ -923,11 +966,14 @@ class CircularRecorder {
   }
 
   bool stop() {
-    if (!running_) {
-      return true;
+    if (microphoneReady_) {
+      microphone_.end();
+      microphoneReady_ = false;
     }
-
-    microphone_.end();
+    if (!workerBusy_) {
+      running_ = false;
+      return !encoderFailed_;
+    }
 
     __mem_fence_release();
     ringHeadPublished_ = localHead_;
@@ -953,6 +999,9 @@ class CircularRecorder {
     }
 
     running_ = false;
+    if (workerStopped) {
+      workerBusy_ = false;
+    }
     if (encoderFailed_ && lastError_.length() == 0) {
       lastError_ = F("MP3 encoder failed.");
     }
@@ -966,6 +1015,8 @@ class CircularRecorder {
   }
 
   bool isRunning() const { return running_; }
+
+  bool workerBusy() const { return workerBusy_; }
 
   uint32_t droppedSamples() const { return droppedSamples_; }
 
@@ -982,6 +1033,25 @@ class CircularRecorder {
   uint32_t uptimeMs() const { return millis() - startedAtMs_; }
 
  private:
+  bool prepareAudioResources() {
+    if (!encoder_.prepare()) {
+      lastError_ = F("Could not allocate persistent Shine encoder.");
+      return false;
+    }
+    if (!microphoneReady_) {
+      if (!configureMicrophone()) {
+        lastError_ = F("Could not configure I2S microphone.");
+        return false;
+      }
+      if (!microphone_.begin()) {
+        lastError_ = F("Could not allocate/start I2S microphone.");
+        return false;
+      }
+      microphoneReady_ = true;
+    }
+    return true;
+  }
+
   bool configureMicrophone() {
     return microphone_.setBCLK(CFG_I2S_BCLK_PIN) &&
            microphone_.setDATA(CFG_I2S_DATA_PIN) &&
@@ -1011,9 +1081,11 @@ class CircularRecorder {
   }
 
   void runCore1Encoding() {
-    Mp3ShineEncoder encoder(mp3Sink_, CFG_AUDIO_SAMPLE_RATE,
-                            CFG_MP3_BITRATE_KBPS);
-    bool encodingOk = encoder.begin();
+    __mem_fence_acquire();
+    bool encodingOk = encoder_.begin();
+    encoderStarted_ = encodingOk;
+    __mem_fence_release();
+    sem_release(&encodeReady_);
 
     size_t stagedBytes = 0;
     uint32_t tail = 0;
@@ -1046,7 +1118,7 @@ class CircularRecorder {
 
       for (uint32_t index = 0; index < pending && encodingOk; ++index) {
         const int16_t sample = pcmRing_[tail++ & (CFG_PCM_RING_SAMPLES - 1)];
-        encodingOk = writePcmToEncoder(encoder, sample, &stagedBytes);
+        encodingOk = writePcmToEncoder(encoder_, sample, &stagedBytes);
       }
 
       __mem_fence_release();
@@ -1054,11 +1126,11 @@ class CircularRecorder {
     }
 
     if (encodingOk && stagedBytes > 0) {
-      encodingOk = encoder.write(pcmStage_, stagedBytes) == stagedBytes;
+      encodingOk = encoder_.write(pcmStage_, stagedBytes) == stagedBytes;
       stagedBytes = 0;
     }
 
-    if (!encoder.end()) {
+    if (!encoder_.end()) {
       encodingOk = false;
     }
     if (!encodingOk) {
@@ -1076,18 +1148,23 @@ class CircularRecorder {
   volatile uint32_t ringTailPublished_ = 0;
   volatile bool producerDone_ = false;
   volatile bool encoderFailed_ = false;
+  volatile bool encoderStarted_ = false;
   volatile bool coreSyncReady_ = false;
   volatile uint32_t core1IdleUs_ = 0;
   volatile uint32_t core1TotalUs_ = 0;
 
   semaphore_t encodeStart_;
   semaphore_t encodeDone_;
+  semaphore_t encodeReady_;
 
   uint8_t pcmStage_[CFG_MP3_STAGE_BYTES];
   CircularMp3Buffer mp3Buffer_;
   CircularMp3Sink mp3Sink_;
+  Mp3ShineEncoder encoder_;
 
   bool running_ = false;
+  bool workerBusy_ = false;
+  bool microphoneReady_ = false;
   uint32_t localHead_ = 0;
   uint32_t droppedSamples_ = 0;
   uint32_t startedAtMs_ = 0;
@@ -1142,17 +1219,17 @@ class App {
       settingsStore_.save(settings_);
     }
 
-    recorder_.initializeMp3Buffer(CFG_MP3_RAM_RESERVE_BYTES,
-                                  CFG_MP3_RAM_MIN_BYTES,
-                                  CFG_MP3_RAM_ALLOC_STEP_BYTES,
-                                  &largestAllocAtBoot_, &mp3RingCapacityAtBoot_);
-
     recorder_.initCoreSync();
 
-    if (mp3RingCapacityAtBoot_ == 0) {
-      enterMenu("Could not allocate MP3 circular RAM buffer.");
+    if (!recorder_.initializeMp3Buffer(CFG_MP3_RAM_RESERVE_BYTES,
+                                       CFG_MP3_RAM_MIN_BYTES,
+                                       CFG_MP3_RAM_ALLOC_STEP_BYTES,
+                                       &largestAllocAtBoot_,
+                                       &mp3RingCapacityAtBoot_)) {
+      enterMenu(recorder_.lastError().c_str());
       return;
     }
+    logMemoryUsage();
 
     if (!startRecorderWithRecovery("boot")) {
       enterMenu("Could not start recorder.");
@@ -1186,6 +1263,10 @@ class App {
     }
 
     const uint32_t nowMs = millis();
+    if (nowMs - lastHeapSampleMs_ >= 1000) {
+      sampleHeap();
+      lastHeapSampleMs_ = nowMs;
+    }
     led_.update();
     serviceButton(nowMs);
     checkBattery(nowMs);
@@ -1233,9 +1314,35 @@ class App {
   }
 
  private:
+  void sampleHeap() {
+    const uint32_t freeHeap = rp2040.getFreeHeap();
+    if (freeHeap < lowestObservedFreeHeap_) {
+      lowestObservedFreeHeap_ = freeHeap;
+    }
+  }
+
+  void logMemoryUsage() {
+    sampleHeap();
+    CFG_SERIAL_PORT.print(F("[memory] MP3 capacity="));
+    CFG_SERIAL_PORT.print(recorder_.buffer().capacity());
+    CFG_SERIAL_PORT.print(F(" free_heap="));
+    CFG_SERIAL_PORT.print(rp2040.getFreeHeap());
+    CFG_SERIAL_PORT.print(F(" lowest_observed_free_heap="));
+    CFG_SERIAL_PORT.println(lowestObservedFreeHeap_);
+  }
+
   bool startRecorderWithRecovery(const char *contextMessage) {
     if (recorder_.start(settings_)) {
+      sampleHeap();
       return true;
+    }
+    CFG_SERIAL_PORT.print(F("Recorder start failed ("));
+    CFG_SERIAL_PORT.print(contextMessage);
+    CFG_SERIAL_PORT.print(F("): "));
+    CFG_SERIAL_PORT.println(recorder_.lastError());
+    if (recorder_.workerBusy()) {
+      CFG_SERIAL_PORT.println(F("Recovery refused: encoder worker is still busy."));
+      return false;
     }
 
     size_t largest = 0;
@@ -1250,25 +1357,29 @@ class App {
     if (!recorder_.initializeMp3Buffer(recoveryReserve, recoveryMin,
                                        CFG_MP3_RAM_ALLOC_STEP_BYTES, &largest,
                                        &chosen)) {
-      if (serialUnlocked_) {
-        CFG_SERIAL_PORT.println(F("Recorder recovery allocation failed."));
-      }
+      CFG_SERIAL_PORT.print(F("Recorder recovery allocation failed: "));
+      CFG_SERIAL_PORT.println(recorder_.lastError());
       return false;
     }
 
     largestAllocAtBoot_ = largest;
     mp3RingCapacityAtBoot_ = chosen;
 
-    if (serialUnlocked_) {
-      CFG_SERIAL_PORT.print(F("Retrying recorder start after recovery ("));
-      CFG_SERIAL_PORT.print(contextMessage);
-      CFG_SERIAL_PORT.print(F(") ring="));
-      CFG_SERIAL_PORT.print(static_cast<unsigned long>(chosen));
-      CFG_SERIAL_PORT.print(F(" reserve="));
-      CFG_SERIAL_PORT.println(static_cast<unsigned long>(recoveryReserve));
-    }
+    CFG_SERIAL_PORT.print(F("Retrying recorder start after recovery ("));
+    CFG_SERIAL_PORT.print(contextMessage);
+    CFG_SERIAL_PORT.print(F(") ring="));
+    CFG_SERIAL_PORT.print(static_cast<unsigned long>(chosen));
+    CFG_SERIAL_PORT.print(F(" reserve="));
+    CFG_SERIAL_PORT.println(static_cast<unsigned long>(recoveryReserve));
+    logMemoryUsage();
 
-    return recorder_.start(settings_);
+    if (!recorder_.start(settings_)) {
+      CFG_SERIAL_PORT.print(F("Recorder retry failed: "));
+      CFG_SERIAL_PORT.println(recorder_.lastError());
+      return false;
+    }
+    sampleHeap();
+    return true;
   }
 
   static void onButtonChange() {
@@ -1290,6 +1401,7 @@ class App {
   }
 
   void logStoppedRecording() {
+    logMemoryUsage();
     CFG_SERIAL_PORT.print(F("[button] MP3 bytes="));
     CFG_SERIAL_PORT.print(recorder_.buffer().size());
     CFG_SERIAL_PORT.print(F(" capacity="));
@@ -1425,6 +1537,7 @@ class App {
     CFG_SERIAL_PORT.print(F("[button] Persist next_file_id="));
     CFG_SERIAL_PORT.print(settings_.nextFileId);
     CFG_SERIAL_PORT.println(settingsSaved ? F(" OK") : F(" FAILED"));
+    logMemoryUsage();
 
     logButtonEvent(F("restarting recorder"));
     if (!startRecorderWithRecovery("resume")) {
@@ -1434,7 +1547,7 @@ class App {
       return;
     }
     led_.setMode(LedMode::Recording);
-    logButtonEvent(F("capture resumed; encoder startup is asynchronous"));
+    logButtonEvent(F("capture resumed; core1 encoder startup acknowledged"));
   }
 
   void powerOff(bool dueToLowBattery) {
@@ -1500,6 +1613,7 @@ class App {
   }
 
   void showDashboard() {
+    logMemoryUsage();
     CFG_SERIAL_PORT.println();
     CFG_SERIAL_PORT.println(F("Status"));
     CFG_SERIAL_PORT.print(F("  Battery: "));
@@ -1540,7 +1654,7 @@ class App {
     CFG_SERIAL_PORT.print(recorder_.core1TotalUs() / 1000);
     CFG_SERIAL_PORT.println(F(" ms"));
 
-    CFG_SERIAL_PORT.print(F("  Largest malloc block at boot: "));
+    CFG_SERIAL_PORT.print(F("  Largest malloc block after audio allocation: "));
     CFG_SERIAL_PORT.print(static_cast<unsigned long>(largestAllocAtBoot_));
     CFG_SERIAL_PORT.println(F(" bytes"));
 
@@ -1807,7 +1921,8 @@ class App {
 
     led_.setMode(LedMode::Recording);
     if (!recorder_.start(settings_)) {
-      CFG_SERIAL_PORT.println(F("Could not start sample recorder."));
+      CFG_SERIAL_PORT.print(F("Could not start sample recorder: "));
+      CFG_SERIAL_PORT.println(recorder_.lastError());
       led_.setMode(LedMode::Menu);
       return;
     }
@@ -1820,8 +1935,13 @@ class App {
       }
       serviceMenuHousekeeping();
     }
-    recorder_.stop();
+    const bool stopped = recorder_.stop();
     led_.setMode(LedMode::Menu);
+    if (!stopped || recorder_.lastError().length() > 0) {
+      CFG_SERIAL_PORT.print(F("Sample recording failed: "));
+      CFG_SERIAL_PORT.println(recorder_.lastError());
+      return;
+    }
 
     if (recorder_.buffer().size() == 0) {
       CFG_SERIAL_PORT.println(F("Sample buffer is empty."));
@@ -1948,6 +2068,7 @@ class App {
   }
 
   void serviceMenuHousekeeping() {
+    sampleHeap();
     led_.update();
     const uint32_t nowMs = millis();
     serviceButton(nowMs);
@@ -1966,6 +2087,8 @@ class App {
   uint16_t lastBatteryMv_ = 0;
   size_t largestAllocAtBoot_ = 0;
   size_t mp3RingCapacityAtBoot_ = 0;
+  uint32_t lowestObservedFreeHeap_ = UINT32_MAX;
+  uint32_t lastHeapSampleMs_ = 0;
 
   DeviceSettingsStore settingsStore_;
   DeviceSettings settings_ = DeviceSettingsStore::defaults();

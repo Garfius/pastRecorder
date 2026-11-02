@@ -1,6 +1,11 @@
 #include "Mp3ShineEncoder.h"
 
 #include <codec-shine.h>
+extern "C" {
+#include <lib/l3loop.h>
+#include <lib/l3mdct.h>
+#include <lib/l3subband.h>
+}
 #include <stdlib.h>
 #include <string.h>
 
@@ -8,12 +13,18 @@ Mp3ShineEncoder::Mp3ShineEncoder(Print &output, uint32_t sampleRate,
                                uint32_t bitrateKbps)
     : output_(output), sampleRate_(sampleRate), bitrateKbps_(bitrateKbps) {}
 
-Mp3ShineEncoder::~Mp3ShineEncoder() { end(); }
-
-bool Mp3ShineEncoder::begin() {
+Mp3ShineEncoder::~Mp3ShineEncoder() {
   end();
-  failed_ = false;
-  bufferedBytes_ = 0;
+  if (encoder_) {
+    shine_close(encoder_);
+  }
+  free(pcm_);
+}
+
+bool Mp3ShineEncoder::prepare() {
+  if (encoder_) {
+    return true;
+  }
   if (sampleRate_ > 48000 || bitrateKbps_ > 320 ||
       shine_check_config(sampleRate_, bitrateKbps_) < 0) {
     return false;
@@ -55,8 +66,43 @@ bool Mp3ShineEncoder::begin() {
   return true;
 }
 
+void Mp3ShineEncoder::resetEncoder() {
+  // Shine has no public reset API. Rebuild its initial state in place, keeping
+  // only configuration and the allocated bitstream (not prior audio/history).
+  const priv_shine_wave_t wave = encoder_->wave;
+  const priv_shine_mpeg_t mpeg = encoder_->mpeg;
+  const bitstream_t bitstream = encoder_->bs;
+  const int sideinfoLength = encoder_->sideinfo_len;
+  memset(encoder_, 0, sizeof(*encoder_));
+  encoder_->wave = wave;
+  encoder_->mpeg = mpeg;
+  encoder_->sideinfo_len = sideinfoLength;
+  encoder_->bs.data = bitstream.data;
+  encoder_->bs.data_size = bitstream.data_size;
+  encoder_->bs.cache_bits = 32;
+  encoder_->mpeg.bits_per_frame = 0;
+  encoder_->mpeg.padding = 0;
+  encoder_->mpeg.slot_lag = -encoder_->mpeg.frac_slots_per_frame;
+  shine_subband_initialise(encoder_);
+  shine_mdct_initialise(encoder_);
+  shine_loop_initialise(encoder_);
+}
+
+bool Mp3ShineEncoder::begin() {
+  end();
+  failed_ = false;
+  bufferedBytes_ = 0;
+  if (!prepare()) {
+    failed_ = true;
+    return false;
+  }
+  resetEncoder();
+  active_ = true;
+  return true;
+}
+
 size_t Mp3ShineEncoder::write(const uint8_t *data, size_t length) {
-  if (!encoder_ || failed_ || (!data && length > 0)) {
+  if (!active_ || failed_ || (!data && length > 0)) {
     return 0;
   }
 
@@ -94,7 +140,7 @@ bool Mp3ShineEncoder::writeFrame() {
 }
 
 bool Mp3ShineEncoder::end() {
-  if (encoder_) {
+  if (active_) {
     if (bufferedBytes_ % sizeof(int16_t) != 0) {
       failed_ = true;
     }
@@ -118,10 +164,7 @@ bool Mp3ShineEncoder::end() {
         writeOutput(cached, cachedBytes);
       }
     }
-    shine_close(encoder_);
-    encoder_ = nullptr;
-    free(pcm_);
-    pcm_ = nullptr;
+    active_ = false;
     bufferedBytes_ = 0;
   }
   return !failed_;

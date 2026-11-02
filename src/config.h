@@ -3,7 +3,7 @@
 // ------------------------------
 // Serial and user interaction
 // ------------------------------
-#define CFG_SERIAL_PORT Serial
+#define CFG_SERIAL_PORT Serial1
 #define CFG_SERIAL_BAUD 115200
 
 #define CFG_BUTTON_PIN 9
@@ -13,7 +13,7 @@
 // Button long press powers off without setting low-battery shutdown state.
 #define CFG_LONG_PRESS_POWER_OFF_MS 2500
 
-#define CFG_MENU_EXIT_REBOOT_MS 5000
+#define CFG_MENU_EXIT_REBOOT_MS 2000
 
 // ------------------------------
 // Audio capture and encode
@@ -57,15 +57,18 @@
 // Maximum wait for core1 encoder worker to acknowledge stop.
 #define CFG_ENCODER_STOP_TIMEOUT_MS 3000
 
-// Reserve heap headroom for encoder internals and filesystem operations.
-#define CFG_MP3_RAM_RESERVE_BYTES 147456
+// Maximum wait for core1 to reset the encoder and acknowledge startup.
+#define CFG_ENCODER_START_TIMEOUT_MS 3000
+
+// Operational headroom AFTER Shine and I2S allocations, not including them.
+// Verify the logged low-water heap during real storage/menu use before tuning.
+#define CFG_MP3_RAM_RESERVE_BYTES 32768
 
 #define CFG_MP3_RAM_MIN_BYTES 65536
 
 #define CFG_MP3_RAM_ALLOC_STEP_BYTES 4096
 
-// If recorder start fails (typically encoder init under low heap), reallocate
-// a smaller MP3 ring once with this additional reserve and retry.
+// If recorder start fails, reallocate a smaller MP3 ring once and retry.
 #define CFG_MP3_RAM_RECOVERY_EXTRA_RESERVE_BYTES 65536
 
 // Do not shrink below this ring size during recovery.
