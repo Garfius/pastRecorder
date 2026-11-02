@@ -61,8 +61,9 @@
 #define CFG_ENCODER_START_TIMEOUT_MS 3000
 
 // Operational headroom AFTER Shine and I2S allocations, not including them.
-// Verify the logged low-water heap during real storage/menu use before tuning.
-#define CFG_MP3_RAM_RESERVE_BYTES 32768
+// 16 KiB reclaims 16 KiB (~5.46 seconds at 24 kbps) versus the 32 KiB reserve.
+// Check the observed heap during storage/menu use before reducing this further.
+#define CFG_MP3_RAM_RESERVE_BYTES 16384
 
 #define CFG_MP3_RAM_MIN_BYTES 65536
 

@@ -39,6 +39,15 @@ enum class LedMode : uint8_t {
   Off
 };
 
+uint32_t observeFreeHeap() {
+  static uint32_t lowest = UINT32_MAX;
+  const uint32_t available = rp2040.getFreeHeap();
+  if (available < lowest) {
+    lowest = available;
+  }
+  return lowest;
+}
+
 template <typename T>
 T clampValue(T value, T low, T high) {
   if (value < low) {
@@ -379,7 +388,9 @@ class CircularMp3Buffer {
     }
 
     if (totalWritten_ <= capacity_) {
-      return file.write(data_, used) == used;
+      const size_t written = file.write(data_, used);
+      observeFreeHeap();
+      return written == used;
     }
 
     const size_t start = static_cast<size_t>(totalWritten_ % capacity_);
@@ -387,12 +398,18 @@ class CircularMp3Buffer {
     if (firstChunk > used) {
       firstChunk = used;
     }
-    if (file.write(data_ + start, firstChunk) != firstChunk) {
+    const size_t firstWritten = file.write(data_ + start, firstChunk);
+    observeFreeHeap();
+    if (firstWritten != firstChunk) {
       return false;
     }
     const size_t secondChunk = used - firstChunk;
-    if (secondChunk > 0 && file.write(data_, secondChunk) != secondChunk) {
-      return false;
+    if (secondChunk > 0) {
+      const size_t secondWritten = file.write(data_, secondChunk);
+      observeFreeHeap();
+      if (secondWritten != secondChunk) {
+        return false;
+      }
     }
     return true;
   }
@@ -588,6 +605,7 @@ class StorageManager {
     }
 
     fs::File output = fs->open(path.c_str(), "w");
+    observeFreeHeap();
     if (!output) {
       if (errorMessage) {
         *errorMessage = String("Could not create ") + path + " on " + name(choice);
@@ -597,6 +615,7 @@ class StorageManager {
 
     const bool ok = buffer.dumpToFile(output);
     output.flush();
+    observeFreeHeap();
     const size_t size = output.size();
     output.close();
     if (!ok || size == 0) {
@@ -662,6 +681,7 @@ class StorageManager {
     }
 
     fs::File output = fs->open(path.c_str(), "w");
+    observeFreeHeap();
     if (!output) {
       if (errorMessage) {
         *errorMessage = String("Could not create ") + path + " on " + name(choice);
@@ -671,6 +691,7 @@ class StorageManager {
 
     const bool ok = buffer.dumpToFile(output);
     output.flush();
+    observeFreeHeap();
     const size_t bytes = output.size();
     output.close();
     if (!ok || bytes == 0) {
@@ -1315,10 +1336,7 @@ class App {
 
  private:
   void sampleHeap() {
-    const uint32_t freeHeap = rp2040.getFreeHeap();
-    if (freeHeap < lowestObservedFreeHeap_) {
-      lowestObservedFreeHeap_ = freeHeap;
-    }
+    lowestObservedFreeHeap_ = observeFreeHeap();
   }
 
   void logMemoryUsage() {
@@ -1329,6 +1347,8 @@ class App {
     CFG_SERIAL_PORT.print(rp2040.getFreeHeap());
     CFG_SERIAL_PORT.print(F(" lowest_observed_free_heap="));
     CFG_SERIAL_PORT.println(lowestObservedFreeHeap_);
+    CFG_SERIAL_PORT.print(F("[memory] MP3 operational reserve="));
+    CFG_SERIAL_PORT.println(CFG_MP3_RAM_RESERVE_BYTES);
   }
 
   bool startRecorderWithRecovery(const char *contextMessage) {
