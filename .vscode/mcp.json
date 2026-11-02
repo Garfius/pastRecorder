@@ -1,0 +1,7 @@
+{
+	"servers": {
+	"mcp-debug-hub": {
+			"url": "http://127.0.0.1:37337/mcp",
+			"type": "sse"
+		}
+		}}

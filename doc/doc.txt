@@ -14,7 +14,7 @@ https://github.com/pschatzmann/arduino-audio-tools
 	DPCM (Differential PCM)
 	rp2040.memcpyDMA(
 	analogReadTemp
-- 3PCS INMP441 MEMS Microphone Module I2S Interface 
+- 3PCS INMP441 MEMS Microphone Module I2S Interface
 - Interface definition:
 	SCK: Serial data clock for I2S interface
 	WS: Serial data word selection for I2S interface
@@ -25,7 +25,7 @@ https://github.com/pschatzmann/arduino-audio-tools
 	VCC: Input power, 1.8V to 3.3V.
 	GND: power ground
 	This product provides tutorials for using ESP32 modules with I2S functionality.
-bootsel click example: 
+bootsel click example:
 	C:\Users\gerard\.platformio\packages\framework-arduinopico\libraries\rp2040\examples\Bootsel\Bootsel.ino - https://github.com/earlephilhower/arduino-pico/blob/master/libraries/rp2040/examples/Bootsel/Bootsel.ino
 	C:\Users\gerard\.platformio\packages\framework-arduinopico\cores\rp2040\Bootsel.cpp
 
@@ -35,7 +35,7 @@ Bootsel.ino	C:\Users\gerard\.platformio\packages\framework-arduinopico\libraries
 Microcontroller c++ rp2040/rp2350
 Framework: arduino
 Core: https://github.com/earlephilhower/arduino-pico
-INMP441 MEMS Microphone Module I2S Interface 
+INMP441 MEMS Microphone Module I2S Interface
 Serial UI: Serial
 Serial XModem: Serial
 Filesystem library: https://github.com/earlephilhower/arduino-pico/tree/master/libraries/LittleFS
@@ -52,19 +52,19 @@ https://github.com/biemster/pico-I2S
 ------------------requeriments base
 - medidor de bateria - On the Raspberry Pi Pico, GPIO29 is connected internally to the VSYS power supply through a voltage divider (a 200kΩ and 100kΩ resistor network), allowing you to measure the input voltage level of the board via ADC channel 3.
  - https://github.com/TuriSc/RP2040-Battery-Check/tree/main
-- menus via serial using https://github.com/Garfius/cliSerialMenu *2 
+- menus via serial using https://github.com/Garfius/cliSerialMenu *2
  - Audio qualitat config
  - copiar mp3 de flash a nova carpeta microSD
- - llistar microSD 
+ - llistar microSD
  - llistar fash
  - reanudar 'record past'
- - alguna opció mostra estat de tot plegat 
+ - alguna opció mostra estat de tot plegat
 - si no hi ha SD usar (flash = littlefs) *1
 - Botó boto per gravar= Bootsel ?
 - mirar com fer l'amplificació demanar peràmetyres de compressió de audio - Fixed gain with limiter/compressor - https://github.com/pschatzmann/arduino-audio-tools/blob/89ee5e87561f21d3e2664f7bddb8bd6d0b7eff89/examples/examples-dsp/examples-maximilian/17-Compressor/17-Compressor.ino - (configure maxiDyn compressor with attack, release, threshold, and ratio.)
 - com fer led pulsacions/colors?
 microcontroller check battery level using cbat vsys vbus
-- shall trrack or be able to calculate tail mp3 block location, you choose, so saves all blocks/frames/chunks
+- shall track or be able to calculate tail mp3 block location, you choose, so saves all blocks/frames/chunks
 - save button is driven by iunterrupt at a preprocessor defined gpio, which stops ALL (both cores(record & mp3 encode), serial menu) and saves whole buffer to storage *1
 - are mp3 frames respected?
 - does mp3 compressor have options?
@@ -73,7 +73,7 @@ microcontroller check battery level using cbat vsys vbus
 - default and hardware pins at: /home/garfius/.platformio/packages/framework-arduinopico/variants/waveshare_rp2350_pizero/pins_arduino.h
 -------------------
 Memory available at boot:
-  rp2040 API: heap 447592, used 2864, free 444728 bytes
+  rp2350 API: heap 447592, used 2864, free 444728 bytes
   mallinfo(): arena 5224, in use 2864, free chunks 2360, never claimed 442368 bytes
   largest malloc() block: 442348 bytes
 ------------------------
@@ -94,3 +94,157 @@ Opcio 6
 CPU load:
   core 0 (recording): busy 0.5%, free 4982 ms of 5007 ms
   core 1 (encoding): busy 39.4%, free 3041 ms of 5020 ms
+Opcio 7
+CPU load:
+  core 0 (recording): busy 3.1%, free 4852 ms of 5008 ms
+  core 1 (encoding): busy 33.4%, free 3354 ms of 5039 ms
+-------------------------------
+Move actual contents of ./src to ./src_testBed and use it as working basic knowledge how to perform the following:
+
+# TASK: create circular audio recording device c/c++ code att src, based on previous recording example at src_testBed
+## main prupose
+circular audio record using maximum ram available, save it to storage when button is pressed
+### main engine workings
+Recreate an altered version of (option 7 which uses lame mp3 encoder) working example located at ./src_testBed, as recordToRamSaveLater which uses 2 cores via (loop1, encodeRamRecording, ...) and 2 buffers (1 for raw wav, 1 for encoded mp3) ...
+BUT
+- The pcm wav buffer ramPcmRing is sized to (minimal +safe) according to performance data from previous main.cpp *2
+- The mp3 buffer is circular, and is the one which allocates as much (blocks/frames/chunks) as all the available ram permits (see old main.cpp & *2), so check it on boot and use it to keep maximum amount of time recorded.
+At boot starts recording (serial is not used until *3)
+Storage criteria
+1. try use SD.h
+2. if full, error or else, fallback to LittleFS.h
+3. if LittleFS.h also full or error(means no storage is available) tell ERROR it via RGB led, and enable Serial *3
+Audio bitrate criteria - fixed by preprocessor directive
+- Wav sampling rate 16Khz
+- MP3 24Kbps
+Power management
+- Use ``https://github.com/TuriSc/RP2040-Battery-Check``
+- periodic low battery check, if low show it via leds and shut down setting *5
+- On power up checks wether if (*5 & (level<(low bettery threshold+ recharge threshold))) powers off again (setting *5 if necessary)
+### hardware interaction
+- user input button: when pressed stops recording, saves all the available mp3 frames on circular buffer to storage as mp3 file, resets all buffers and starts recording again, may use incremental numbers as file names.
+- output to user is a state monitoring (RGB led) which is connected to 3 gpio output configurable as preprocessor directives, uses (colors and blinking)->(you guess) to tell what is doing, blinking shall be non blocking, output logic might be iverted, short blinks to spare energy.
+- Long press to power off not setting *5
+## Software interaction
+(on Serial port activity)=*3 (connection | Serial activity) stops recording and to Serial *4=(show all settings, storage/s state, circular buffer status and capacity, ... , and finally the 'menu options' UI)
+'menu options' format simple similar to old main.cpp, on no valid option choosen *4
+### menu options structure
+- List files
+ - Choose LittleFS | SD
+- Send file via Xmodem
+ - Choose LittleFS | SD
+- Erase all LittleFS files
+ - Choose LittleFS | SD
+- Copy all LittleFS files to new microSD folder (enter | randomize name)
+- audio quality settings
+ - Choose setting, set it from Serial and save to EEPROM.h *6
+- Record audio sample and send it via XModem
+- Send LittleFS file via Xmodem
+- Exit menu, sleep X seconds and Reboot
+### internals
+There shall be a struct or similar with all the actual settings, stored in binary using EEPROM.h. Defaults to be predefined in preprocessor directives for:
+Pre amplification *6
+- kHighPassHz
+- kInputGain
+- kMakeupGain
+- kCeiling
+limiter/compressor *6
+- Attack
+- Release
+- Threshold
+- Ratio
+Power
+- Powered off because low battery (boolean) *5
+#### code structure
+Use (object oriented programming - OOP) as long as it does not take too much ram
+Try use audio-tools mp3 lame encoder ``.pio/libdeps/Rp2350ZeroDebug/audio-tools/src/AudioTools/AudioCodecs/CodecMP3LAME.h``, instead of include as little dependencies as possible
+May insert developer jokes about wiretaping or alike
+May tweak ``platformio.ini``
+Default (settings, configuration, constants, ...) shall be located at a separate header file like ``config.h`` via #define preprocessor directives
+- SD pins for CS & SPI
+- (I2S=IIC) pins for microphone
+- RGB gpio pins
+- Long press to power off time in milliseconds
+- output logic iverted for RGB leds - boolean
+- Wav sampling rate
+- MP3 bitrate
+- user input button gpio pin
+- periodic low battery check interval
+- recharge threshold
+- Low battery threshold
+- sleep X seconds and Reboot time in milliseconds
+- Pre amplification - defaults
+- limiter/compressor - defaults
+- ...
+### documentation
+Reboot example: ``https://github.com/earlephilhower/arduino-pico/blob/master/libraries/rp2040/examples/RestartReason/RestartReason.ino``
+
+interrupt button example:
+```
+https://raw.githubusercontent.com/espressif/arduino-esp32/refs/heads/master/libraries/ESP32/examples/GPIO/FunctionalInterrupt/FunctionalInterrupt.ino
+```
+
+Testing data for 5 seconds sample *2
+```
+To compress 5 seconds of wav at 16Khz to mp3 24kbps takes 2301 ms.
+
+pcm wav buffer ramPcmRing: Encoder finished 12 ms after the last sample; PCM ring peak 255/16384 samples.
+
+Cpu usage:
+    Option 4
+    CPU load:
+        core 0 (recording): busy 0.5%, free 4982 ms of 5007 ms
+        core 1 (encoding): busy 36.5%, free 3184 ms of 5020 ms
+    Option 5
+    CPU load:
+        core 0 (recording): busy 2.8%, free 4863 ms of 5007 ms
+        core 1 (encoding): busy 37.0%, free 3160 ms of 5020 ms
+    Option 6
+    CPU load:
+        core 0 (recording): busy 0.5%, free 4982 ms of 5007 ms
+        core 1 (encoding): busy 39.4%, free 3041 ms of 5020 ms
+    Option 7
+    CPU load:
+        core 0 (recording): busy 3.1%, free 4852 ms of 5008 ms
+        core 1 (encoding): busy 33.4%, free 3354 ms of 5039 ms
+
+Memory available at boot:
+  rp2350 API: heap 447592, used 2864, free 444728 bytes
+  mallinfo(): arena 5224, in use 2864, free chunks 2360, never claimed 442368 bytes
+  largest malloc() block: 442348 bytes
+
+```
+
+Battery check example
+```
+https://github.com/TuriSc/RP2040-Battery-Check/blob/main/battery-check.c
+```
+
+Power off example
+```c++
+void powerOff(){
+    SD.end();
+    Wire.end();
+
+    Serial1.flush();
+    Serial1.end();
+    __wfi();
+    //__WFI();//Wait For Interrupt https://community.platformio.org/t/wfi-was-not-declared-in-this-scope-help/47279
+    while (true){}
+}
+```
+------------------------------
+Fer record sense https://github.com/pschatzmann/arduino-audio-tools creant un minimal wrapper de https://github.com/pschatzmann/codec-shine/ amb valors 16Khz 24kbps.
+Afegir https://github.com/pschatzmann/Maximilian per audio compressor.
+------------------------------
+
+## Using ./src_testBed as working code example improve the code at ./src
+### context
+./src uses lame.h, Mp3LameEncoder.h which shall be phased out, use shine=``https://github.com/pschatzmann/codec-shine/`` implementation at ./src_testBed instead
+we don't know memory requierements of writing to microSD, so memory runs out, possible ways to fix it
+1. keep Littlefs files instanced all the time from boot, so have somewhere to dump audio buffer when button pushes
+2. when button pushes dump mp3 circular audio buffer to LittleFS temporal file, so we can free ram of mp3 buffer while keeping .mp3 audio file at littlefs
+3. copy LittleFS temporal file to microsd if available, else rename it to definitive file name.
+# task
+analyze availability of the pruposed method 
+

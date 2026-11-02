@@ -1,0 +1,8 @@
+{
+	"mcpServers": {
+		"my-mcp-server-1a3c2e39": {
+			"url": " http://localhost:37337/mcp",
+			"type": "http"
+		}
+	}
+}

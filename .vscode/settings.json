@@ -4,5 +4,6 @@
             "approve": true,
             "matchCommandLine": true
         }
-    }
+    },
+    "cmake.sourceDirectory": "/mnt/bull/backup/pastRecorder/pastRecorder/lib/codec-lame"
 }
